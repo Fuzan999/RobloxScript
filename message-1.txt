@@ -1,0 +1,1658 @@
+-- hi
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local CS = game:GetService("CollectionService")
+local plr = Players.LocalPlayer
+for _ = 1, 240 do
+	if plr then
+		break
+	end
+	task.wait(0.5)
+	plr = Players.LocalPlayer
+end
+if not plr then
+	error("[BossFarmHub] LocalPlayer never appeared - aborting", 0)
+end
+
+local function freshState()
+	local conns = {}
+	return {
+		alive = function() return true end,
+		onCleanup = function() end,
+		connect = function(sig: any, fn: any)
+			local c = sig:Connect(fn)
+			table.insert(conns, c)
+			return c
+		end,
+		disconnectAll = function()
+			for _, c in ipairs(conns) do
+				pcall(function()
+					c:Disconnect()
+				end)
+			end
+			table.clear(conns)
+		end,
+	}
+end
+
+do
+	local function neutralize(t: any)
+		if type(t) ~= "table" then
+			return
+		end
+		if type(t.alive) == "function" then
+			pcall(function()
+				t.alive = function() return false end
+			end)
+		end
+		if type(t.disconnectAll) == "function" then
+			pcall(t.disconnectAll)
+		end
+	end
+	neutralize(getgenv().STATE)
+	local ok, res = pcall(function()
+		return filtergc("table", { Keys = { "alive", "onCleanup", "connect" } }, false)
+	end)
+	if ok and type(res) == "table" then
+		for _, t in ipairs(res) do
+			neutralize(t)
+		end
+	end
+	if getgenv().HorsemanUpgrade ~= nil then
+		getgenv().HorsemanUpgrade = nil
+	end
+	pcall(function()
+		local ev = RS:FindFirstChild("SwordRemotes")
+		ev = ev and ev:FindFirstChild("BaconEvent")
+		local sig = ev and ev.OnClientEvent
+		if sig then
+			for _, c in ipairs(getconnections(sig)) do
+				local f = c.Function
+				if typeof(f) == "function" then
+					local okS, s = pcall(function()
+						return debug.info(f, "s")
+					end)
+					if okS and s == "" then
+						pcall(function()
+							c:Disconnect()
+						end)
+					end
+				end
+			end
+		end
+	end)
+	task.wait(0.8)
+end
+
+local STATE: any = freshState()
+getgenv().STATE = STATE
+
+local MYRUN = {}
+getgenv().HubRun = MYRUN
+local function aliveOk(): boolean
+	return STATE.alive() and getgenv().HubRun == MYRUN
+end
+
+local function LOG(...: any)
+	print("[BossFarmHub]", ...)
+end
+
+local safeErrAt: { [string]: number } = {}
+local function safeRun(label: string, fn: any)
+	local ok, err = pcall(fn)
+	if not ok then
+		local now = os.clock()
+		if not safeErrAt[label] or now - safeErrAt[label] > 30 then
+			safeErrAt[label] = now
+			LOG(label .. " error:", err)
+		end
+	end
+	return ok
+end
+
+do
+	local VirtualUser = game:GetService("VirtualUser")
+	if plr then
+		STATE.connect(plr.Idled, function()
+			pcall(function()
+				VirtualUser:CaptureController()
+				VirtualUser:ClickButton2(Vector2.new())
+			end)
+		end)
+	end
+end
+
+local SwordRemotes = RS:WaitForChild("SwordRemotes", 30)
+local TimeRemotes = RS:WaitForChild("TimeRemotes", 30)
+local SpinRemotes = RS:WaitForChild("SpinRemotes", 30)
+local RewardsRemotes = RS:WaitForChild("RewardsRemotes", 30)
+local GiveawayRemotes = RS:WaitForChild("GiveawayRemotes", 30)
+local swordAction = SwordRemotes and SwordRemotes:FindFirstChild("Action")
+local timeAction = TimeRemotes and TimeRemotes:FindFirstChild("Action")
+local spinFn = SpinRemotes and SpinRemotes:FindFirstChild("Spin")
+local rewardClaim = RewardsRemotes and RewardsRemotes:FindFirstChild("Claim")
+local giveawayEnter = GiveawayRemotes and GiveawayRemotes:FindFirstChild("Enter")
+
+local SwordConfig = require(RS:WaitForChild("SwordConfig", 30) :: ModuleScript)
+local TimeConfig = require(RS:WaitForChild("TimeConfig", 30) :: ModuleScript)
+
+LOG("loading WindUI...")
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+if not WindUI then
+	error("WindUI failed to load")
+end
+
+local guiContainer = gethui() or game:GetService("CoreGui")
+local prevGui = getgenv().BossFarmHubGui
+if prevGui and typeof(prevGui) == "Instance" and prevGui.Parent then
+	pcall(function() prevGui:Destroy() end)
+end
+local preExisting = {}
+for _, ch in ipairs(guiContainer:GetChildren()) do
+	preExisting[ch] = true
+end
+
+local Window = WindUI:CreateWindow({
+	Title = "Boss Farm Hub",
+	Icon = "swords",
+	Author = "AllayLuaU",
+	Size = UDim2.fromOffset(620, 480),
+	Theme = "Dark",
+	ToggleKey = Enum.KeyCode.RightShift,
+	HideSearchBar = true,
+})
+
+local hubGui = guiContainer:FindFirstChild("WindUI")
+if not hubGui then
+	for _, ch in ipairs(guiContainer:GetChildren()) do
+		if not preExisting[ch] then
+			hubGui = ch
+			break
+		end
+	end
+end
+getgenv().BossFarmHubGui = hubGui
+
+local function notify(title: string, content: string)
+	pcall(function()
+		WindUI:Notify({ Title = title, Content = content, Duration = 4 })
+	end)
+end
+
+local mode = "halloween"
+local autoFarm = true
+local autoUpgrade = true
+local autoSpin = true
+local autoSeason = true
+local autoDaily = true
+local autoPlaytime = true
+local autoUgc = false
+local autoGiveaway = true
+
+local resetting = false
+local entering = false
+local enteredGrace = 0
+local wasInFight = false
+local lastEnterTry = 0
+local giveawayBusy = false
+local lastGiveawayTry = 0
+local cd = 0.5
+local lastSwing = 0
+local lastFollow = 0
+
+local turboAttack = false
+local lastTurbo = 0
+local lastTurboAnim = 0
+local TURBO_INTERVAL = 0.15
+
+local autoRejoin = true
+local rejoinBusy = false
+local hubStartedAt = os.clock()
+local soloSince = 0
+local soloRejoinTimes: { number } = {}
+local soloBlockedUntil = 0
+local playtimeFullSince = 0
+
+local function getChar(): (Model?, BasePart?, Humanoid?)
+	local char = plr.Character
+	if not char then
+		return nil, nil, nil
+	end
+	return char, char:FindFirstChild("HumanoidRootPart") :: BasePart?, char:FindFirstChildOfClass("Humanoid")
+end
+
+local function inCombat(): boolean
+	local char = plr.Character
+	return char ~= nil and char:GetAttribute("InCombat") == true
+end
+
+local function baconActive(): boolean
+	if not plr then
+		return false
+	end
+	local gui = plr:FindFirstChild("PlayerGui")
+	local bg = gui and gui:FindFirstChild("BaconGui")
+	local panel = bg and bg:FindFirstChild("Panel")
+	return panel ~= nil and panel.Visible == true
+end
+
+local okSavedMode, savedMode = pcall(readfile, "BossFarmHubMode.txt")
+if okSavedMode and type(savedMode) == "string" then
+	local cleaned = string.gsub(savedMode, "%s+", "")
+	if cleaned == "bacon" or cleaned == "noob" or cleaned == "halloween" then
+		mode = cleaned
+		LOG("restored last farm mode:", cleaned)
+	end
+end
+
+if baconActive() then
+	mode = "bacon"
+	pcall(writefile, "BossFarmHubMode.txt", "bacon")
+	LOG("started inside the bacon arena - bacon mode")
+end
+
+local function clearFrozen(char: Model)
+	pcall(function()
+		if char:GetAttribute("Frozen") then
+			char:SetAttribute("Frozen", false)
+		end
+	end)
+end
+
+local function refreshCooldown()
+	local ok, res = pcall(function()
+		local def = SwordConfig.ByKey[plr:GetAttribute("SwordEquipped") or ""] or SwordConfig.ByKey[SwordConfig.StarterSword]
+		return SwordConfig.Combat.BaseCooldown / math.max(def.Speed or 1, 0.1)
+	end)
+	if ok and type(res) == "number" then
+		cd = res
+	end
+end
+
+local function findSword(char: Model): (Tool?, boolean)
+	local tool = char:FindFirstChildOfClass("Tool")
+	if tool and tool:GetAttribute("CombatSword") then
+		return tool, true
+	end
+	for _, t in ipairs(char:GetChildren()) do
+		if t:IsA("Tool") and t:GetAttribute("CombatSword") then
+			return t, true
+		end
+	end
+	for _, t in ipairs(plr.Backpack:GetChildren()) do
+		if t:IsA("Tool") and t:GetAttribute("CombatSword") then
+			return t, false
+		end
+	end
+	return nil, false
+end
+
+local function keepAlive(char: Model)
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum then
+		return
+	end
+	STATE.connect(hum.HealthChanged, function(h: number)
+		if resetting then
+			return
+		end
+		if h > 0 and h < hum.MaxHealth then
+			hum.Health = hum.MaxHealth
+		end
+	end)
+end
+
+if plr.Character then
+	keepAlive(plr.Character)
+end
+STATE.connect(plr.CharacterAdded, keepAlive)
+
+local function resetCharacter()
+	if resetting then
+		return
+	end
+	resetting = true
+	LOG("resetting character to return to the plaza")
+	task.wait(0.8)
+	local oldChar = plr.Character
+	local hum = oldChar and oldChar:FindFirstChildOfClass("Humanoid")
+	if hum and hum.Health > 0 then
+		pcall(function()
+			hum.Health = 0
+		end)
+		task.wait(0.5)
+		if oldChar and oldChar.Parent and hum.Health > 0 then
+			pcall(function()
+				oldChar:BreakJoints()
+			end)
+		end
+	end
+	local deadline = os.clock() + 25
+	while aliveOk() and os.clock() < deadline do
+		local c = plr.Character
+		if c and c ~= oldChar then
+			local h = c:FindFirstChildOfClass("Humanoid")
+			if h and h.Health > 0 and c:FindFirstChild("HumanoidRootPart") then
+				break
+			end
+		end
+		task.wait(0.25)
+	end
+	task.wait(0.4)
+	resetting = false
+	wasInFight = false
+	LOG("respawned")
+end
+
+local function enterFight(trigger: BasePart, label: string, check: () -> boolean)
+	if entering or resetting or giveawayBusy then
+		return
+	end
+	entering = true
+	task.spawn(function()
+		local tries = 0
+		while aliveOk() and not check() and tries < 3 do
+			tries += 1
+			local char, hrp = getChar()
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if not hrp or (hum and hum.Health <= 0) then
+				break
+			end
+			local charAtTouch = char
+			LOG(("entering %s (try %d)"):format(label, tries))
+			hrp.CFrame = CFrame.new(trigger.Position)
+			task.wait(0.25)
+			firetouchinterest(hrp, trigger, 1)
+			task.wait(0.1)
+			firetouchinterest(hrp, trigger, 0)
+			local deadline = os.clock() + 4
+			while os.clock() < deadline and aliveOk() do
+				if check() or plr.Character ~= charAtTouch then
+					break
+				end
+				task.wait(0.2)
+			end
+			if check() or plr.Character ~= charAtTouch then
+				LOG(label .. " session started")
+				enteredGrace = os.clock()
+				break
+			end
+			task.wait(1)
+		end
+		if not check() then
+			LOG(label .. " entry did not start, will retry")
+		end
+		entering = false
+	end)
+end
+
+local function tryEnterHalloween()
+	if entering or resetting or giveawayBusy then
+		return
+	end
+	local p = workspace:FindFirstChild("HalloweenBossPortal")
+	if not p then
+		return
+	end
+	local surf = p:FindFirstChild("PortalSurface")
+	local sign = surf and surf:FindFirstChild("BossSign")
+	local status = sign and sign:FindFirstChild("StatusLabel")
+	local trigger: BasePart? = nil
+	if p then
+		trigger = p:FindFirstChild("Trigger") :: BasePart?
+	end
+	if not status or not trigger then
+		return
+	end
+	local text = (status.Text or ""):lower()
+	if string.find(text, "fighting", 1, true) then
+		return
+	end
+	if not string.find(text, "step into", 1, true) then
+		return
+	end
+	enterFight(trigger, "halloween", inCombat)
+end
+
+local function tryEnterNoob()
+	if entering or resetting or giveawayBusy then
+		return
+	end
+	if workspace:GetAttribute("BossPhase") ~= "Open" then
+		return
+	end
+	local bp = workspace:FindFirstChild("BattlePlaza")
+	local portal = bp and bp:FindFirstChild("BossPortal")
+	local trigger: BasePart? = nil
+	if portal then
+		trigger = portal:FindFirstChild("Trigger") :: BasePart?
+	end
+	if not trigger then
+		return
+	end
+	enterFight(trigger, "giant noob", inCombat)
+end
+
+local function tryEnterBacon()
+	if entering or resetting or giveawayBusy then
+		return
+	end
+	local bp = workspace:FindFirstChild("BattlePlaza")
+	local portal = bp and bp:FindFirstChild("BaconPortal")
+	local trigger: BasePart? = nil
+	if portal then
+		trigger = portal:FindFirstChild("Trigger") :: BasePart?
+	end
+	if not trigger then
+		return
+	end
+	enterFight(trigger, "bacon arena", baconActive)
+end
+
+local function leaveBacon()
+	if swordAction then
+		pcall(function()
+			swordAction:FireServer("LeaveBacon")
+		end)
+	end
+end
+
+local function leaveBoss()
+	if swordAction then
+		pcall(function()
+			swordAction:FireServer("LeaveBoss")
+		end)
+	end
+end
+
+local function switchMode(label: string)
+	local newMode = label == "Giant Noob" and "noob" or (label == "Bacon Arena" and "bacon" or "halloween")
+	if newMode == mode then
+		return
+	end
+	local old = mode
+	mode = newMode
+	pcall(writefile, "BossFarmHubMode.txt", newMode)
+	LOG("mode ->", newMode)
+	task.spawn(function()
+		if newMode == "bacon" and baconActive() and not inCombat() then
+			return
+		end
+		local dirty = false
+		if old == "bacon" and baconActive() then
+			dirty = true
+			leaveBacon()
+			task.wait(1.2)
+		elseif old == "noob" and inCombat() then
+			dirty = true
+			leaveBoss()
+			task.wait(1.2)
+		elseif old == "halloween" and inCombat() then
+			dirty = true
+		end
+		if dirty or baconActive() or inCombat() then
+			wasInFight = false
+			resetCharacter()
+		end
+	end)
+end
+
+local REJOIN_MARKER = "BossFarmHubLastRejoin.txt"
+
+local function lastRejoinAge(): number
+	local ok, data = pcall(readfile, REJOIN_MARKER)
+	if ok and type(data) == "string" then
+		local t = tonumber(data)
+		if t then
+			return os.time() - t
+		end
+	end
+	return 1e9
+end
+
+local function markRejoin()
+	pcall(writefile, REJOIN_MARKER, tostring(os.time()))
+end
+
+local function pickServerJob(): string?
+	local ok, res = pcall(function()
+		local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100"):format(game.GameId)
+		local body = game:HttpGet(url)
+		local data = game:GetService("HttpService"):JSONDecode(body)
+		local best: string? = nil
+		local bestN = 1
+		if type(data) == "table" and type(data.data) == "table" then
+			for _, s in ipairs(data.data) do
+				local n = tonumber(s.playing) or 0
+				local m = tonumber(s.maxPlayers) or 0
+				if type(s.id) == "string" and s.id ~= game.JobId and n > bestN and n < m then
+					best, bestN = s.id, n
+				end
+			end
+		end
+		return best
+	end)
+	if ok and type(res) == "string" then
+		return res
+	end
+	return nil
+end
+
+local function doRejoin(reason: string, preferPopulated: boolean, allowFallback: boolean): boolean
+	if rejoinBusy or not aliveOk() then
+		return false
+	end
+	rejoinBusy = true
+	LOG("auto rejoin: " .. reason)
+	notify("Auto rejoin", reason)
+	local ts = game:GetService("TeleportService")
+	local job: string? = nil
+	if preferPopulated then
+		job = pickServerJob()
+		if not job and not allowFallback then
+			LOG("auto rejoin: no busier server found - staying put")
+			notify("Auto rejoin", "No busier server found")
+			rejoinBusy = false
+			return false
+		end
+	end
+	task.wait(1)
+	markRejoin()
+	local loader = [=[pcall(function()
+	local Players = game:GetService("Players")
+	local plr = Players.LocalPlayer
+	for _ = 1, 120 do
+		if plr and plr:FindFirstChild("PlayerGui") and plr.Character then
+			break
+		end
+		task.wait(0.5)
+		plr = Players.LocalPlayer
+	end
+	task.wait(2)
+	local fn = loadstring(readfile("NoobScript.luau"))
+	if fn then
+		fn()
+	end
+end)]=]
+	pcall(function()
+		queue_on_teleport(loader)
+	end)
+	local started = false
+	if job then
+		started = pcall(function()
+			ts:TeleportToPlaceInstance(game.PlaceId, job, plr)
+		end)
+		if started then
+			LOG("auto rejoin: hopping to a server with players")
+		end
+	end
+	if not started and allowFallback then
+		started = pcall(function()
+			ts:Teleport(game.PlaceId, plr)
+		end)
+	end
+	if not started then
+		pcall(clear_teleport_queue)
+		LOG("auto rejoin: teleport failed to start")
+		notify("Auto rejoin", "Teleport failed - will retry later")
+		rejoinBusy = false
+		return false
+	end
+	return true
+end
+
+local function tickFight()
+	local char, hrp, hum = getChar()
+	if not char or not hrp or not hum or hum.Health <= 0 then
+		return
+	end
+	if not resetting and hum.Health < hum.MaxHealth then
+		hum.Health = hum.MaxHealth
+	end
+	clearFrozen(char)
+	local bossPos = workspace:GetAttribute("BossPos")
+	if typeof(bossPos) ~= "Vector3" then
+		return
+	end
+	local now = os.clock()
+	if now - lastFollow > 0.25 then
+		lastFollow = now
+		local flat = Vector3.new(bossPos.X - hrp.Position.X, 0, bossPos.Z - hrp.Position.Z)
+		if flat.Magnitude > 3.5 then
+			hrp.CFrame = CFrame.new(bossPos.X, hrp.Position.Y, bossPos.Z)
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		elseif flat.Magnitude > 2 then
+			hum:MoveTo(hrp.Position + flat.Unit * 1)
+		end
+	end
+
+	local tool, equipped = findSword(char)
+	if tool and not equipped then
+		pcall(function()
+			hum:EquipTool(tool)
+		end)
+		return
+	end
+	local cam = workspace.CurrentCamera
+	if cam then
+		cam.CFrame = CFrame.lookAt(cam.CFrame.Position, bossPos)
+	end
+	local dir = bossPos - hrp.Position
+	dir = Vector3.new(dir.X, 0, dir.Z)
+	if dir.Magnitude < 0.01 then
+		dir = hrp.CFrame.LookVector
+	end
+	if turboAttack and SwordRemotes then
+		if now - lastTurbo >= TURBO_INTERVAL then
+			lastTurbo = now
+			pcall(function()
+				SwordRemotes.Swing:FireServer(dir.Unit)
+			end)
+			if tool and now - lastTurboAnim > 0.7 then
+				lastTurboAnim = now
+				pcall(function()
+					tool:Activate()
+				end)
+			end
+		end
+		return
+	end
+	if tool then
+		pcall(function()
+			tool:Activate()
+		end)
+		return
+	end
+	if now - lastSwing >= cd + 0.06 then
+		lastSwing = now
+		if SwordRemotes then
+			pcall(function()
+				SwordRemotes.Swing:FireServer(dir.Unit)
+			end)
+		end
+	end
+end
+
+local baconTarget: BasePart? = nil
+local baconTargetAt = 0
+local lastFallbackScan = 0
+
+local function findCombatant(): BasePart?
+	local char, hrp = getChar()
+	if not hrp then
+		return nil
+	end
+	local best: BasePart? = nil
+	local bestD: number? = nil
+	for _, v in ipairs(CS:GetTagged("Combatant")) do
+		if v ~= char and v:IsA("Model") then
+			local r = v:FindFirstChild("HumanoidRootPart") :: BasePart?
+			local h = v:FindFirstChildOfClass("Humanoid")
+			if r and (not h or h.Health > 0) then
+				local d = (r.Position - hrp.Position).Magnitude
+				if d < 220 and (not bestD or d < bestD) then
+					best, bestD = r, d
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function findNearbyHumanoid(): BasePart?
+	local char, hrp = getChar()
+	if not hrp then
+		return nil
+	end
+	local best: BasePart? = nil
+	local bestD: number? = nil
+	local checks = 0
+	local function consider(inst: Instance)
+		if checks > 400 then
+			return
+		end
+		checks += 1
+		if inst ~= char and inst:IsA("Model") then
+			local h = inst:FindFirstChildOfClass("Humanoid")
+			local r: BasePart? = inst.PrimaryPart
+			if not r then
+				local found = inst:FindFirstChild("HumanoidRootPart") or inst:FindFirstChildWhichIsA("BasePart")
+				if found and found:IsA("BasePart") then
+					r = found
+				end
+			end
+			if h and h.Health > 0 and r then
+				local d = (r.Position - hrp.Position).Magnitude
+				if d < 120 and (not bestD or d < bestD) then
+					best, bestD = r, d
+				end
+			end
+		end
+	end
+	for _, ch in ipairs(workspace:GetChildren()) do
+		consider(ch)
+		for _, sub in ipairs(ch:GetChildren()) do
+			consider(sub)
+		end
+	end
+	return best
+end
+
+local baconPace = 2.5
+local baconNextAttackAt = 0
+local baconUnpaidStreak = 0
+local baconRestUntil = 0
+local baconPaidTotal = 0
+local lastPaidEventAt = 0
+
+local baconEvent = SwordRemotes and SwordRemotes:FindFirstChild("BaconEvent")
+if baconEvent then
+	STATE.connect(baconEvent.OnClientEvent, function(kind: any, data: any)
+		if kind == "Join" then
+			baconPace = 2.5
+			baconUnpaidStreak = 0
+			baconRestUntil = 0
+			LOG("bacon: joined a fresh session - pace reset to burn the reward quota")
+		elseif kind == "Kill" and type(data) == "table" then
+			if data.Paid == true then
+				baconUnpaidStreak = 0
+				baconPaidTotal += 1
+				local nowK = os.clock()
+				if nowK - lastPaidEventAt > 0.5 then
+					baconPace = math.max(baconPace - 0.5, 2)
+					notify("Bacon reward", ("+%s Time"):format(tostring(data.Amount)))
+				end
+				lastPaidEventAt = nowK
+				LOG(("bacon kill PAID +%s Time (pace %.1fs, total %d)"):format(tostring(data.Amount), baconPace, baconPaidTotal))
+			else
+				baconUnpaidStreak += 1
+				baconPace = math.min(baconPace + 1, 20)
+				if baconUnpaidStreak >= 15 then
+					baconUnpaidStreak = 0
+					baconRestUntil = os.clock() + 60
+					LOG("bacon: 15 unpaid kills in a row - resting 60s to reset the reward cooldown")
+				end
+			end
+		end
+	end)
+end
+
+local function tickBacon()
+	local char, hrp, hum = getChar()
+	if not char or not hrp or not hum or hum.Health <= 0 then
+		return
+	end
+	clearFrozen(char)
+	local now = os.clock()
+	if now - baconTargetAt > 0.5 or not (baconTarget and baconTarget.Parent) then
+		baconTargetAt = now
+		local t = findCombatant()
+		if not t and now - lastFallbackScan > 2 then
+			lastFallbackScan = now
+			t = findNearbyHumanoid()
+		end
+		if t then
+			baconTarget = t
+		elseif baconTarget and not baconTarget.Parent then
+			baconTarget = nil
+		end
+	end
+	local target = baconTarget
+	if not target then
+		return
+	end
+	local flat = Vector3.new(target.Position.X - hrp.Position.X, 0, target.Position.Z - hrp.Position.Z)
+	local dist = flat.Magnitude
+	local dir = dist > 0.01 and flat.Unit or hrp.CFrame.LookVector
+	if dist > 4.5 then
+		local step = math.min(dist - 3, 2.2)
+		local newPos = hrp.Position + dir * step
+		hrp.CFrame = CFrame.lookAt(newPos, newPos + dir)
+		hrp.AssemblyLinearVelocity = Vector3.zero
+	end
+	local cam = workspace.CurrentCamera
+	if cam then
+		cam.CFrame = CFrame.lookAt(cam.CFrame.Position, target.Position)
+	end
+	local canAttack = now >= baconNextAttackAt and now >= baconRestUntil
+	local tool, equipped = findSword(char)
+	if tool then
+		if not equipped then
+			pcall(function()
+				hum:EquipTool(tool)
+			end)
+		elseif dist < 12 and canAttack then
+			baconNextAttackAt = now + baconPace
+			pcall(function()
+				tool:Activate()
+			end)
+		end
+		return
+	end
+	if dist < 12 and canAttack and now - lastSwing >= cd + 0.06 then
+		lastSwing = now
+		baconNextAttackAt = now + baconPace
+		if SwordRemotes then
+			pcall(function()
+				SwordRemotes.Swing:FireServer(dir)
+			end)
+		end
+	end
+end
+
+local CANDY_PER_TIME = 100000
+pcall(function()
+	local hcfg = require(RS:FindFirstChild("HalloweenConfig") :: ModuleScript)
+	if type(hcfg) == "table" and type(hcfg.TimePerCandy) == "number" then
+		CANDY_PER_TIME = hcfg.TimePerCandy
+	end
+end)
+
+local UPGRADE_MARGIN = 1.15
+
+local function swordDps(def: any, baseCd: number): number
+	return (def.Damage or 0) / (baseCd / math.max(def.Speed or 1, 0.1))
+end
+
+local function pickUpgrade(cfg: any, owned: any, candyBal: number, timeBal: number, currentDps: number)
+	local baseCd = cfg.Combat.BaseCooldown
+	local candyBudget = candyBal + math.floor(timeBal / CANDY_PER_TIME)
+	local best: any = nil
+	for _, def in ipairs(cfg.Swords) do
+		local dps = swordDps(def, baseCd)
+		if not owned[def.Key] and dps > currentDps * UPGRADE_MARGIN then
+			local via, price
+			if type(def.Candy) == "number" and candyBudget >= def.Candy then
+				via, price = "candy", def.Candy
+			elseif def.Price and type(def.Price.Time) == "number" and timeBal >= def.Price.Time then
+				via, price = "time", def.Price.Time
+			end
+			if via and (not best or dps > best.dps) then
+				best = { key = def.Key, dps = dps, via = via, price = price }
+			end
+		end
+	end
+	return best
+end
+
+local function upgradeTick()
+	local ok, err = pcall(function()
+		local cfg = SwordConfig
+		if not cfg.Swords or not swordAction then
+			return
+		end
+		local baseCd = cfg.Combat.BaseCooldown
+		local owned = {}
+		for k in tostring(plr:GetAttribute("SwordsOwned") or cfg.StarterSword):gmatch("[^,]+") do
+			owned[k] = true
+		end
+		local bestOwnedKey: string? = nil
+		local bestOwnedDps = -1
+		for _, def in ipairs(cfg.Swords) do
+			if owned[def.Key] then
+				local dps = swordDps(def, baseCd)
+				if dps > bestOwnedDps then
+					bestOwnedKey, bestOwnedDps = def.Key, dps
+				end
+			end
+		end
+		if not resetting and bestOwnedKey and plr:GetAttribute("SwordEquipped") ~= bestOwnedKey then
+			swordAction:FireServer("Equip", bestOwnedKey)
+			LOG("upgrade: equipping better owned sword " .. bestOwnedKey)
+			task.wait(0.5)
+		end
+		local candy = tonumber(plr:GetAttribute("Candy")) or 0
+		local timeBal = tonumber(plr:GetAttribute("Time")) or 0
+		local best = pickUpgrade(cfg, owned, candy, timeBal, bestOwnedDps)
+		if not best then
+			return
+		end
+		LOG(("upgrade: buying %s (%.0f dps via %s, price %d)"):format(best.key, best.dps, best.via, best.price))
+		notify("Upgrade", ("Buying %s (%s)"):format(best.key, best.via))
+		if best.via == "candy" then
+			local need = math.ceil(best.price - candy)
+			while need > 0 do
+				local chunk = math.min(need, 500)
+				swordAction:FireServer("Convert", chunk)
+				need -= chunk
+				task.wait(0.9)
+			end
+			task.wait(0.6)
+			swordAction:FireServer("ShopSword", best.key)
+		else
+			swordAction:FireServer("Buy", best.key, "Time")
+		end
+		task.wait(1)
+	end)
+	if not ok then
+		LOG("upgrade error:", err)
+	end
+end
+
+local function countList(s: any): number
+	local n = 0
+	for _ in tostring(s or ""):gmatch("%d+") do
+		n += 1
+	end
+	return n
+end
+
+local function trySpin()
+	if not spinFn then
+		return
+	end
+	local spins = tonumber(plr:GetAttribute("Spins")) or 0
+	if spins <= 0 then
+		return
+	end
+	local ok, idx, prize = pcall(function()
+		return (spinFn :: RemoteFunction):InvokeServer()
+	end)
+	if ok and type(idx) == "number" then
+		LOG(("spin won prize #%s (%s)"):format(tostring(idx), tostring(prize)))
+		notify("Spin", ("Won: %s"):format(tostring(prize or idx)))
+	else
+		LOG("spin attempt failed:", tostring(idx))
+	end
+end
+
+local function tryDaily()
+	if not rewardClaim then
+		return
+	end
+	if plr:GetAttribute("RewardsDailyReady") ~= true then
+		return
+	end
+	rewardClaim:FireServer("daily")
+	LOG("daily reward claimed")
+	notify("Rewards", "Daily reward claimed")
+end
+
+local function trySeason()
+	if not timeAction then
+		return
+	end
+	local tier = tonumber(plr:GetAttribute("SeasonTier")) or 0
+	local free = countList(plr:GetAttribute("SeasonFree"))
+	local premium = plr:GetAttribute("SeasonPremium") == true
+	local premClaimed = countList(plr:GetAttribute("SeasonPremiumClaimed"))
+	if tier > free or (premium and tier > premClaimed) then
+		timeAction:FireServer("ClaimSeasonAll")
+		LOG(("season: claiming tiers (tier %d, free %d, premium %d)"):format(tier, free, premClaimed))
+		notify("Season", "Claiming available tiers")
+	end
+end
+
+local playtimeFiredAt = {}
+local function tryPlaytime()
+	if not rewardClaim then
+		return
+	end
+	if plr:GetAttribute("RewardsLoaded") ~= true then
+		return
+	end
+	local start = tonumber(plr:GetAttribute("RewardsPlaytimeStart")) or 0
+	local elapsed = workspace:GetServerTimeNow() - start
+	local claimed = {}
+	for n in tostring(plr:GetAttribute("RewardsPlaytimeClaimed") or ""):gmatch("%d+") do
+		claimed[tonumber(n)] = true
+	end
+	for i, step in ipairs(TimeConfig.Rewards.Playtime) do
+		if not claimed[i] and elapsed >= (tonumber(step.Minutes) or 0) * 60 and os.clock() - (playtimeFiredAt[i] or 0) > 45 then
+			playtimeFiredAt[i] = os.clock()
+			rewardClaim:FireServer("playtime", i)
+			LOG(("playtime reward %d claimed (+%s time)"):format(i, tostring(step.Time)))
+			notify("Rewards", ("Playtime %s min reward claimed"):format(tostring(step.Minutes)))
+			task.wait(0.4)
+		end
+	end
+end
+
+local function ugcCurrency(item: any): (string, number)
+	local cost = tonumber(item.Cost) or 0
+	if cost < 1000 then
+		return "candy", cost
+	end
+	return "time", cost
+end
+
+local function tryUgc()
+	if not timeAction then
+		return
+	end
+	local ugc = TimeConfig.UGC
+	if type(ugc) ~= "table" then
+		return
+	end
+	for i, item in ipairs(ugc) do
+		if type(item) == "table" and plr:GetAttribute("Award_" .. i) ~= true then
+			if not (item.VipOnly == true and plr:GetAttribute("Pass_VIP") ~= true) then
+				local currency, cost = ugcCurrency(item)
+				local balance = currency == "candy" and (tonumber(plr:GetAttribute("Candy")) or 0) or (tonumber(plr:GetAttribute("Time")) or 0)
+				if balance >= cost then
+					if currency == "candy" then
+						timeAction:FireServer("BuyUGC", i)
+					else
+						timeAction:FireServer("ClaimUGC", i)
+					end
+					LOG(("UGC #%d attempt (%s %d)"):format(i, currency, cost))
+					notify("UGC", ("Claiming UGC #%d (%d %s)"):format(i, cost, currency))
+					task.wait(1)
+				end
+			end
+		end
+	end
+end
+
+local function giveawayStatus(): (number, number, number?)
+	local round = tonumber(RS:GetAttribute("GiveawayRound")) or 0
+	local entries = tonumber(RS:GetAttribute("GiveawayEntries")) or 0
+	local nextDraw = RS:GetAttribute("GiveawayNextDraw")
+	if type(nextDraw) ~= "number" then
+		nextDraw = nil
+	end
+	return round, entries, nextDraw
+end
+
+local function giveawayEntered(): boolean
+	local round = tonumber(RS:GetAttribute("GiveawayRound")) or 0
+	return round > 0 and plr:GetAttribute("GiveawayEntered") == round
+end
+
+local function doGiveaway()
+	giveawayBusy = true
+	local ok, err = pcall(function()
+		local round = tonumber(RS:GetAttribute("GiveawayRound")) or 0
+		if round <= 0 or plr:GetAttribute("GiveawayEntered") == round then
+			return
+		end
+		local pod = workspace:FindFirstChild("GiveawayPodium")
+		local podium = pod and pod:FindFirstChild("Podium")
+		local pad: BasePart? = nil
+		if podium then
+			pad = podium:FindFirstChild("Pad") :: BasePart?
+		end
+		if not pad then
+			return
+		end
+		local _, hrp, hum = getChar()
+		if not hrp or not hum or hum.Health <= 0 then
+			return
+		end
+		local prize = tonumber(RS:GetAttribute("GiveawayPrize")) or 500000
+		LOG("giveaway: heading to the pad for round " .. round)
+		hrp.CFrame = CFrame.new(pad.Position + Vector3.new(0, 3, 0))
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		task.wait(0.6)
+		local prompt = pad:FindFirstChild("EnterPrompt") :: ProximityPrompt?
+		if prompt then
+			pcall(fireproximityprompt, prompt)
+		end
+		task.wait(0.9)
+		if plr:GetAttribute("GiveawayEntered") ~= round and giveawayEnter then
+			pcall(function()
+				giveawayEnter:FireServer()
+			end)
+			task.wait(0.9)
+		end
+		if plr:GetAttribute("GiveawayEntered") == round then
+			LOG(("giveaway: entered round %d"):format(round))
+			notify("Giveaway", ("Entered the draw for %d Time!"):format(prize))
+		else
+			LOG("giveaway: entry not registered yet, will retry")
+		end
+	end)
+	if not ok then
+		LOG("giveaway error:", err)
+	end
+	giveawayBusy = false
+end
+
+local function fmtNum(n: number): string
+	return (tostring(math.floor(n)):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))
+end
+
+local function clockText(d: number): string
+	d = math.max(0, math.floor(d))
+	if d >= 3600 then
+		return ("%d:%02d:%02d"):format(d // 3600, d % 3600 // 60, d % 60)
+	end
+	return ("%02d:%02d"):format(d // 60, d % 60)
+end
+
+local CONFIG_FILE = "BossFarmHubConfig.json"
+
+local function loadConfig(): any
+	local ok, data = pcall(readfile, CONFIG_FILE)
+	if ok and type(data) == "string" then
+		local okD, decoded = pcall(function()
+			return game:GetService("HttpService"):JSONDecode(data)
+		end)
+		if okD and type(decoded) == "table" then
+			return decoded
+		end
+	end
+	return {}
+end
+
+local function saveConfig()
+	local data = {
+		autoFarm = autoFarm,
+		autoUpgrade = autoUpgrade,
+		turboAttack = turboAttack,
+		autoRejoin = autoRejoin,
+		autoSpin = autoSpin,
+		autoSeason = autoSeason,
+		autoDaily = autoDaily,
+		autoPlaytime = autoPlaytime,
+		autoGiveaway = autoGiveaway,
+		autoUgc = autoUgc,
+	}
+	pcall(function()
+		writefile(CONFIG_FILE, game:GetService("HttpService"):JSONEncode(data))
+	end)
+end
+
+do
+	local cfg = loadConfig()
+	local function pick(key: string, fallback: boolean): boolean
+		local v = cfg[key]
+		return type(v) == "boolean" and v or fallback
+	end
+	autoFarm = pick("autoFarm", autoFarm)
+	autoUpgrade = pick("autoUpgrade", autoUpgrade)
+	turboAttack = pick("turboAttack", turboAttack)
+	autoRejoin = pick("autoRejoin", autoRejoin)
+	autoSpin = pick("autoSpin", autoSpin)
+	autoSeason = pick("autoSeason", autoSeason)
+	autoDaily = pick("autoDaily", autoDaily)
+	autoPlaytime = pick("autoPlaytime", autoPlaytime)
+	autoGiveaway = pick("autoGiveaway", autoGiveaway)
+	autoUgc = pick("autoUgc", autoUgc)
+	LOG("config: saved settings applied")
+	saveConfig()
+end
+
+local TabFarm = Window:Tab({ Title = "Farm", Icon = "swords" })
+local TabRewards = Window:Tab({ Title = "Rewards", Icon = "gift" })
+local TabStatus = Window:Tab({ Title = "Status", Icon = "activity" })
+
+local modeDropdownReady = false
+local modeDropdown = TabFarm:Dropdown({
+	Title = "Boss to farm",
+	Desc = "Where the farm fights",
+	Values = { "Halloween Horseman", "Giant Noob", "Bacon Arena" },
+	Value = mode == "bacon" and "Bacon Arena" or (mode == "noob" and "Giant Noob" or "Halloween Horseman"),
+	Callback = function(selected: any)
+		if not modeDropdownReady then
+			return
+		end
+		local ok, err = pcall(switchMode, tostring(selected))
+		if not ok then
+			LOG("mode switch error:", err)
+		end
+	end,
+})
+
+task.defer(function()
+	task.wait(1)
+	if modeDropdown then
+		pcall(function()
+			modeDropdown:SetValue(mode == "bacon" and "Bacon Arena" or (mode == "noob" and "Giant Noob" or "Halloween Horseman"))
+		end)
+	end
+	modeDropdownReady = true
+end)
+
+TabFarm:Toggle({
+	Title = "Auto farm",
+	Desc = "Enter fights and swing automatically",
+	Value = autoFarm,
+	Callback = function(v: any)
+		autoFarm = v == true
+		saveConfig()
+	end,
+})
+
+TabFarm:Toggle({
+	Title = "Auto upgrade sword",
+	Desc = "Equip the best owned sword, buy better ones with Time/Candy",
+	Value = autoUpgrade,
+	Callback = function(v: any)
+		autoUpgrade = v == true
+		saveConfig()
+	end,
+})
+
+TabFarm:Toggle({
+	Title = "Auto rejoin",
+	Desc = "Rejoins when all playtime rewards are claimed, or when you are alone in the server",
+	Value = autoRejoin,
+	Callback = function(v: any)
+		autoRejoin = v == true
+		saveConfig()
+	end,
+})
+
+TabFarm:Toggle({
+	Title = "Turbo attack",
+	Desc = "Fires swings directly at 6-7/sec. The server rate-limits swings to the sword cooldown, so damage stays the same (off by default)",
+	Value = turboAttack,
+	Callback = function(v: any)
+		turboAttack = v == true
+		saveConfig()
+	end,
+})
+
+TabFarm:Button({
+	Title = "Rejoin now",
+	Desc = "Teleport to a busier server of this game",
+	Callback = function()
+		task.spawn(function()
+			local ok, err = pcall(doRejoin, "manual rejoin", true, false)
+			if not ok then
+				LOG("rejoin error:", err)
+			end
+		end)
+	end,
+})
+
+local farmPara = TabFarm:Paragraph({ Title = "Farm status", Desc = "starting..." })
+
+TabFarm:Button({
+	Title = "Reset character now",
+	Desc = "Die and respawn at the plaza",
+	Callback = function()
+		task.spawn(function()
+			local ok, err = pcall(resetCharacter)
+			if not ok then
+				LOG("reset error:", err)
+			end
+		end)
+	end,
+})
+
+TabRewards:Toggle({
+	Title = "Auto spin",
+	Desc = "Use spins when you have any",
+	Value = autoSpin,
+	Callback = function(v: any)
+		autoSpin = v == true
+		saveConfig()
+	end,
+})
+
+TabRewards:Toggle({
+	Title = "Auto claim season",
+	Desc = "Claim season pass tiers as they unlock",
+	Value = autoSeason,
+	Callback = function(v: any)
+		autoSeason = v == true
+		saveConfig()
+	end,
+})
+
+TabRewards:Toggle({
+	Title = "Auto claim daily gift",
+	Desc = "Claim the daily streak gift when ready",
+	Value = autoDaily,
+	Callback = function(v: any)
+		autoDaily = v == true
+		saveConfig()
+	end,
+})
+
+TabRewards:Toggle({
+	Title = "Auto claim playtime",
+	Desc = "Claim 2/5/10/15/30/60 min rewards as they unlock",
+	Value = autoPlaytime,
+	Callback = function(v: any)
+		autoPlaytime = v == true
+		saveConfig()
+	end,
+})
+
+TabRewards:Toggle({
+	Title = "Auto enter giveaway",
+	Desc = "Hourly 500K Time giveaway: hops to the pad and enters",
+	Value = autoGiveaway,
+	Callback = function(v: any)
+		autoGiveaway = v == true
+		saveConfig()
+	end,
+})
+
+TabRewards:Toggle({
+	Title = "Auto UGC awards (spends currency)",
+	Desc = "Claims UGC items when you can afford their Time/Candy cost",
+	Value = autoUgc,
+	Callback = function(v: any)
+		autoUgc = v == true
+		saveConfig()
+	end,
+})
+
+TabRewards:Button({
+	Title = "Claim everything now",
+	Desc = "Spin, season, daily, playtime, giveaway (and UGC if enabled)",
+	Callback = function()
+		task.spawn(function()
+			pcall(trySpin)
+			pcall(trySeason)
+			pcall(tryDaily)
+			pcall(tryPlaytime)
+			if autoUgc then
+				pcall(tryUgc)
+			end
+			if not giveawayEntered() then
+				doGiveaway()
+			end
+		end)
+	end,
+})
+
+local rewardsPara = TabRewards:Paragraph({ Title = "Rewards status", Desc = "loading..." })
+local givePara = TabRewards:Paragraph({ Title = "Giveaway", Desc = "loading..." })
+
+local infoPara = TabStatus:Paragraph({
+	Title = "Boss Farm Hub v1",
+	Desc = "Menu toggle key: RightShift\nFarm runs while this menu exists.\nSTOP below kills every loop the hub started.",
+})
+
+TabStatus:Button({
+	Title = "STOP everything (kill all hub instances)",
+	Desc = "Stops every loop and closes the menu",
+	Callback = function()
+		getgenv().HubRun = nil
+		if type(getgenv().STATE) == "table" then
+			if type(getgenv().STATE.alive) == "function" then
+				getgenv().STATE.alive = function() return false end
+			end
+			if type(getgenv().STATE.disconnectAll) == "function" then
+				pcall(getgenv().STATE.disconnectAll)
+			end
+		end
+		if hubGui and hubGui.Parent then
+			pcall(function() hubGui:Destroy() end)
+		end
+		LOG("stopped by user")
+	end,
+})
+
+task.spawn(function()
+	while aliveOk() do
+		local ok, err = pcall(function()
+			if autoFarm then
+				if mode == "bacon" then
+					if baconActive() then
+						tickBacon()
+					elseif os.clock() - lastEnterTry > 3 then
+						lastEnterTry = os.clock()
+						tryEnterBacon()
+					end
+				else
+					if inCombat() then
+						wasInFight = true
+						entering = false
+						tickFight()
+					else
+						local grace = os.clock() - enteredGrace < 8
+						if wasInFight and not resetting and not grace then
+							wasInFight = false
+							local oldMode = mode
+							task.spawn(function()
+								safeRun("fight exit", function()
+									if oldMode == "noob" then
+										leaveBoss()
+										task.wait(0.8)
+									end
+									if not inCombat() then
+										resetCharacter()
+									end
+								end)
+							end)
+						end
+						if os.clock() - enteredGrace > 8 and os.clock() - lastEnterTry > 3 and not baconActive() then
+							lastEnterTry = os.clock()
+							if mode == "halloween" then
+								tryEnterHalloween()
+							else
+								tryEnterNoob()
+							end
+						end
+					end
+				end
+			end
+		end)
+		if not ok then
+			LOG("farm loop error:", err)
+		end
+		task.wait(0.15)
+	end
+	LOG("farm loop stopped")
+end)
+
+task.spawn(function()
+	local lastSpin, lastDaily, lastPlaytime, lastSeason, lastUgc = 0, 0, 0, 0, 0
+	local lastRejoinCheck = 0
+	while aliveOk() do
+		local ok = pcall(function()
+			local now = os.clock()
+			if autoSpin and now - lastSpin > 4 then
+				lastSpin = now
+				trySpin()
+			end
+			if autoDaily and now - lastDaily > 8 then
+				lastDaily = now
+				tryDaily()
+			end
+			if autoPlaytime and now - lastPlaytime > 12 then
+				lastPlaytime = now
+				tryPlaytime()
+			end
+			if autoSeason and now - lastSeason > 30 then
+				lastSeason = now
+				trySeason()
+			end
+			if autoUgc and now - lastUgc > 25 then
+				lastUgc = now
+				tryUgc()
+			end
+			if autoRejoin and now - lastRejoinCheck > 5 and not rejoinBusy and not resetting and not entering then
+				lastRejoinCheck = now
+				local count = #Players:GetPlayers()
+				if now >= soloBlockedUntil then
+					if count <= 1 then
+						if soloSince == 0 then
+							soloSince = now
+						end
+						if now - soloSince > 15 and now - hubStartedAt > 45 and lastRejoinAge() > 120 then
+							local recent = 0
+							for _, t in ipairs(soloRejoinTimes) do
+								if now - t < 600 then
+									recent += 1
+								end
+							end
+							if recent >= 3 then
+								soloBlockedUntil = now + 600
+								LOG("auto rejoin: alone but hop budget is used - pausing hops for 10 min")
+							else
+								table.insert(soloRejoinTimes, now)
+								local went = doRejoin(("alone in the server (%d player) - hopping to a busier one"):format(count), true, false)
+								if not went then
+									table.remove(soloRejoinTimes)
+									soloBlockedUntil = now + 180
+									soloSince = 0
+								end
+								return
+							end
+						end
+					else
+						soloSince = 0
+					end
+				end
+				if plr:GetAttribute("RewardsLoaded") == true and not rejoinBusy then
+					local claimedAll = true
+					for i = 1, #TimeConfig.Rewards.Playtime do
+						local found = false
+						for n in tostring(plr:GetAttribute("RewardsPlaytimeClaimed") or ""):gmatch("%d+") do
+							if tonumber(n) == i then
+								found = true
+								break
+							end
+						end
+						if not found then
+							claimedAll = false
+							break
+						end
+					end
+					if claimedAll then
+						if playtimeFullSince == 0 then
+							playtimeFullSince = now
+						end
+						if now - playtimeFullSince > 12 and lastRejoinAge() > 600 then
+							doRejoin("playtime rewards all claimed - rejoining to reset them", true, true)
+						end
+					else
+						playtimeFullSince = 0
+					end
+				end
+			end
+		end)
+		if not ok then
+			LOG("rewards loop error")
+		end
+		task.wait(1)
+	end
+	LOG("rewards loop stopped")
+end)
+
+task.spawn(function()
+	while aliveOk() do
+		local ok, err = pcall(function()
+			local round = tonumber(RS:GetAttribute("GiveawayRound")) or 0
+			local due = round > 0 and plr:GetAttribute("GiveawayEntered") ~= round
+			if autoGiveaway and due and not giveawayBusy and not resetting and not entering and not inCombat() and not baconActive() then
+				if os.clock() - lastGiveawayTry > 12 then
+					lastGiveawayTry = os.clock()
+					task.spawn(doGiveaway)
+				end
+			end
+		end)
+		if not ok then
+			LOG("giveaway loop error:", err)
+		end
+		task.wait(5)
+	end
+	LOG("giveaway loop stopped")
+end)
+
+task.spawn(function()
+	task.wait(5)
+	while aliveOk() do
+		if autoUpgrade and not resetting then
+			safeRun("upgrade", upgradeTick)
+		end
+		task.wait(60)
+	end
+	LOG("upgrade loop stopped")
+end)
+
+task.spawn(function()
+	while aliveOk() do
+		safeRun("cooldown", refreshCooldown)
+		task.wait(5)
+	end
+end)
+
+task.spawn(function()
+	local lastFarm, lastRew, lastGive = "", "", ""
+	while aliveOk() do
+		pcall(function()
+			local time = tonumber(plr:GetAttribute("Time")) or 0
+			local candy = tonumber(plr:GetAttribute("Candy")) or 0
+			local spins = tonumber(plr:GetAttribute("Spins")) or 0
+			local tier = tonumber(plr:GetAttribute("SeasonTier")) or 0
+			local vip = plr:GetAttribute("Pass_VIP") == true
+			local serverNow = workspace:GetServerTimeNow()
+
+			local modeName = mode == "noob" and "Giant Noob" or (mode == "bacon" and "Bacon Arena" or "Halloween Horseman")
+			local stateText
+			if not autoFarm then
+				stateText = "off"
+			elseif mode == "bacon" then
+				stateText = baconActive() and (("fighting bacons (pace %.1fs, paid %d%s)"):format(baconPace, baconPaidTotal, os.clock() < baconRestUntil and ", resting" or "")) or (entering and "entering..." or "waiting")
+			elseif resetting then
+				stateText = "resetting"
+			elseif inCombat() then
+				stateText = "fighting"
+			elseif entering then
+				stateText = "entering..."
+			else
+				stateText = "waiting"
+			end
+			local phase = tostring(workspace:GetAttribute("BossPhase") or "?")
+			local nextAt = workspace:GetAttribute("BossNextAt")
+			local noobText = "Giant Noob: " .. phase
+			if phase ~= "Open" and type(nextAt) == "number" then
+				noobText = noobText .. (" (next in %s)"):format(clockText(nextAt - serverNow))
+			end
+			local sword = tostring(plr:GetAttribute("SwordEquipped") or "?")
+			local farmText = ("%s: %s | sword: %s\n%s | Time %s | Candy %d"):format(modeName, stateText, sword, noobText, fmtNum(time), candy)
+			if farmText ~= lastFarm then
+				lastFarm = farmText
+				farmPara:SetDesc(farmText)
+			end
+
+			local dailyReady = plr:GetAttribute("RewardsDailyReady") == true
+			local dailyNext = tonumber(plr:GetAttribute("RewardsDailyNext")) or 0
+			local streak = tonumber(plr:GetAttribute("RewardsDailyStreak")) or 0
+			local dailyText = dailyReady and "daily READY" or ("daily in " .. clockText(dailyNext - serverNow))
+			local start = tonumber(plr:GetAttribute("RewardsPlaytimeStart")) or 0
+			local elapsed = serverNow - start
+			local claimedCount = 0
+			local claimedSet = {}
+			for n in tostring(plr:GetAttribute("RewardsPlaytimeClaimed") or ""):gmatch("%d+") do
+				claimedSet[tonumber(n)] = true
+				claimedCount += 1
+			end
+			local nextStep: string? = nil
+			for i, step in ipairs(TimeConfig.Rewards.Playtime) do
+				if not claimedSet[i] then
+					local left = (tonumber(step.Minutes) or 0) * 60 - elapsed
+					nextStep = left > 0 and clockText(left) or "now"
+					break
+				end
+			end
+			local freeClaimed = countList(plr:GetAttribute("SeasonFree"))
+			local halloweenToday = plr:GetAttribute("HalloweenDailyDay") == math.floor(os.time() / 86400)
+			local ugcClaimed = 0
+			for i = 1, 8 do
+				if plr:GetAttribute("Award_" .. i) == true then
+					ugcClaimed += 1
+				end
+			end
+			local rewText = ("%s | streak %d | spins %d\nplaytime %d/%d, next in %s\nseason tier %d, free claimed %d, VIP %s\nhalloween daily %s | UGC %d/8 awarded"):format(
+				dailyText, streak, spins, claimedCount, #TimeConfig.Rewards.Playtime, tostring(nextStep or "-"),
+				tier, freeClaimed, vip and "YES" or "NO", halloweenToday and "auto-granted today" or "pending", ugcClaimed)
+			if rewText ~= lastRew then
+				lastRew = rewText
+				rewardsPara:SetDesc(rewText)
+			end
+
+			local round, entries, nextDraw = giveawayStatus()
+			local entered = round > 0 and plr:GetAttribute("GiveawayEntered") == round
+			local giveText = ("round %d | entries %d | %s | %s"):format(
+				round, entries,
+				nextDraw and ("draw in " .. clockText(nextDraw - serverNow)) or "draw --:--",
+				entered and "ENTERED" or (autoGiveaway and "will auto-enter" or "auto off"))
+			if giveText ~= lastGive then
+				lastGive = giveText
+				givePara:SetDesc(giveText)
+			end
+		end)
+		task.wait(1)
+	end
+end)
+
+LOG("loaded v1 (farm halloween/noob/bacon | giveaway | rewards | upgrade | auto-rejoin)")
