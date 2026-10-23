@@ -1215,16 +1215,6 @@ TabFarm:Toggle({
 })
 
 TabFarm:Toggle({
-	Title = "Auto upgrade sword",
-	Desc = "Equip the best owned sword, buy better ones with Time/Candy",
-	Value = autoUpgrade,
-	Callback = function(v: any)
-		autoUpgrade = v == true
-		saveConfig()
-	end,
-})
-
-TabFarm:Toggle({
 	Title = "Auto rejoin",
 	Desc = "Rejoins when all playtime rewards are claimed, or when you are alone in the server",
 	Value = autoRejoin,
