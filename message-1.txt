@@ -1219,7 +1219,7 @@ TabFarm:Toggle({
 	Desc = "Equip the best owned sword, buy better ones with Time/Candy",
 	Value = autoUpgrade,
 	Callback = function(v: any)
-		autoUpgrade = v == true
+		autoUpgrade = v == false
 		saveConfig()
 	end,
 })
